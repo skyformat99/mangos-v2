@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package xreq implements the raw REQ protocol, which is the request side of
-// the request/response pattern.  (REP is the response.)
-package xreq
+// Package xrespondent implements the raw RESPONDENT protocol, which is the
+// response side of survey pattern.  (SURVEYOR is the survey generator.)
+package xrespondent
 
 import (
+	"encoding/binary"
 	"sync"
 	"time"
 
@@ -28,19 +29,20 @@ type pipe struct {
 	s      *socket
 	closed bool
 	closeq chan struct{}
+	sendq  chan *protocol.Message
 }
 
 type socket struct {
 	closed     bool
 	closeq     chan struct{}
 	recvq      chan *protocol.Message
-	sendq      chan *protocol.Message
 	pipes      map[uint32]*pipe
 	recvExpire time.Duration
 	sendExpire time.Duration
 	sendQLen   int
 	recvQLen   int
 	bestEffort bool
+	ttl        int
 	sync.Mutex
 }
 
@@ -52,16 +54,31 @@ var (
 const defaultQLen = 128
 
 func init() {
-	closedQ = make(chan time.Time)
+	closedQ := make(chan time.Time)
 	close(closedQ)
 }
 
-// SendMsg implements sending a message.  The message must come with
-// its headers already prepared.  This will be at a minimum the request
-// ID at the end of the header, plus any leading backtrace information
-// coming from a paired REP socket.
+// SendMessage implements sending a message.  The message must already
+// have headers... the first 4 bytes are the identity of the pipe
+// we should send to.
 func (s *socket) SendMsg(m *protocol.Message) error {
+
+	if len(m.Header) < 4 {
+		m.Free()
+		return nil
+	}
+
+	id := binary.BigEndian.Uint32(m.Header)
+	hdr := m.Header
+	m.Header = m.Header[4:]
+
 	s.Lock()
+	p, ok := s.pipes[id]
+	if !ok {
+		s.Unlock()
+		m.Free()
+		return nil
+	}
 	bestEffort := s.bestEffort
 	tq := nilQ
 	if bestEffort {
@@ -72,15 +89,19 @@ func (s *socket) SendMsg(m *protocol.Message) error {
 	s.Unlock()
 
 	select {
-	case s.sendq <- m:
+	case p.sendq <- m:
 		return nil
 	case <-s.closeq:
+		// restore the header
+		m.Header = hdr
 		return protocol.ErrClosed
 	case <-tq:
 		if bestEffort {
 			m.Free()
 			return nil
 		}
+		// restore the header
+		m.Header = hdr
 		return protocol.ErrSendTimeout
 	}
 }
@@ -110,14 +131,39 @@ outer:
 		if m == nil {
 			break
 		}
-
 		if len(m.Body) < 4 {
 			m.Free()
 			continue
 		}
 
-		m.Header = m.Body[:4]
-		m.Body = m.Body[4:]
+		// Outer most value of header is pipe ID
+		m.Header = append(make([]byte, 4), m.Header...)
+		binary.BigEndian.PutUint32(m.Header, p.ep.GetID())
+
+		s.Lock()
+		ttl := s.ttl
+		s.Unlock()
+
+		hops := 0
+		finish := false
+		for !finish {
+			if hops > ttl {
+				m.Free()
+				continue outer
+			}
+			hops++
+			if len(m.Body) < 4 {
+				m.Free() // Garbled!
+				continue outer
+			}
+			if m.Body[0]&0x80 != 0 {
+				// High order bit set indicates ID and end of
+				// message headers.
+				finish = true
+			}
+			m.Header = append(m.Header, m.Body[:4]...)
+			m.Body = m.Body[4:]
+		}
 
 		select {
 		case s.recvq <- m:
@@ -136,23 +182,23 @@ outer:
 // This is a puller, and doesn't permit for priorities.  We might want
 // to refactor this to use a push based scheme later.
 func (p *pipe) sender() {
-	s := p.s
 outer:
 	for {
 		var m *protocol.Message
 		select {
-		case m = <-s.sendq:
+		case m = <-p.sendq:
 		case <-p.closeq:
 			break outer
-		case <-s.closeq:
-			break outer
+		}
+		if m == nil {
+			break
 		}
 
 		if e := p.ep.SendMsg(m); e != nil {
 			break
 		}
 	}
-	p.ep.Close()
+	p.Close()
 }
 
 func (p *pipe) Close() error {
@@ -172,6 +218,15 @@ func (p *pipe) Close() error {
 
 func (s *socket) SetOption(name string, value interface{}) error {
 	switch name {
+
+	case protocol.OptionTTL:
+		if v, ok := value.(int); ok && v > 0 && v < 256 {
+			s.Lock()
+			s.ttl = v
+			s.Unlock()
+			return nil
+		}
+		return protocol.ErrBadValue
 
 	case protocol.OptionRecvDeadline:
 		if v, ok := value.(time.Duration); ok {
@@ -201,29 +256,10 @@ func (s *socket) SetOption(name string, value interface{}) error {
 
 	case protocol.OptionWriteQLen:
 		if v, ok := value.(int); ok && v >= 0 {
-
-			newchan := make(chan *protocol.Message, v)
 			s.Lock()
+			// This does not impact pipes already connected.
 			s.sendQLen = v
-			oldchan := s.sendq
-			s.sendq = newchan
 			s.Unlock()
-
-			for {
-				var m *protocol.Message
-				select {
-				case m = <-oldchan:
-				default:
-				}
-				if m == nil {
-					break
-				}
-				select {
-				case newchan <- m:
-				default:
-					m.Free()
-				}
-			}
 		}
 		return protocol.ErrBadValue
 
@@ -263,6 +299,11 @@ func (s *socket) GetOption(option string) (interface{}, error) {
 	switch option {
 	case protocol.OptionRaw:
 		return true, nil
+	case protocol.OptionTTL:
+		s.Lock()
+		v := s.ttl
+		s.Unlock()
+		return v, nil
 	case protocol.OptionRecvDeadline:
 		s.Lock()
 		v := s.recvExpire
@@ -305,7 +346,6 @@ func (s *socket) Close() error {
 	for _, p := range s.pipes {
 		pipes = append(pipes, p)
 	}
-
 	s.Unlock()
 	close(s.closeq)
 
@@ -326,6 +366,7 @@ func (s *socket) AddPipe(ep protocol.Pipe) error {
 		ep:     ep,
 		s:      s,
 		closeq: make(chan struct{}),
+		sendq:  make(chan *protocol.Message, s.sendQLen),
 	}
 	s.pipes[ep.GetID()] = p
 
@@ -354,10 +395,10 @@ func (*socket) Info() protocol.Info {
 // Info returns protocol information.
 func Info() protocol.Info {
 	return protocol.Info{
-		Self:     protocol.ProtoReq,
-		Peer:     protocol.ProtoRep,
-		SelfName: "req",
-		PeerName: "rep",
+		Self:     protocol.ProtoRespondent,
+		Peer:     protocol.ProtoSurveyor,
+		SelfName: "respondent",
+		PeerName: "surveyor",
 	}
 }
 
@@ -367,14 +408,14 @@ func NewProtocol() protocol.Protocol {
 		pipes:    make(map[uint32]*pipe),
 		closeq:   make(chan struct{}),
 		recvq:    make(chan *protocol.Message, defaultQLen),
-		sendq:    make(chan *protocol.Message, defaultQLen),
 		sendQLen: defaultQLen,
 		recvQLen: defaultQLen,
+		ttl:      8,
 	}
 	return s
 }
 
-// NewSocket allocates a new Socket using the REQ protocol.
+// NewSocket allocates a new Socket using the RESPONDENT protocol.
 func NewSocket() (protocol.Socket, error) {
 	return protocol.MakeSocket(NewProtocol()), nil
 }

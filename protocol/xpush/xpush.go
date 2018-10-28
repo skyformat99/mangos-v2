@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package xreq implements the raw REQ protocol, which is the request side of
-// the request/response pattern.  (REP is the response.)
-package xreq
+// Package xpush implements the raw PUSH protocol.
+package xpush
 
 import (
 	"sync"
@@ -33,14 +32,13 @@ type pipe struct {
 type socket struct {
 	closed     bool
 	closeq     chan struct{}
-	recvq      chan *protocol.Message
 	sendq      chan *protocol.Message
 	pipes      map[uint32]*pipe
-	recvExpire time.Duration
 	sendExpire time.Duration
 	sendQLen   int
-	recvQLen   int
 	bestEffort bool
+	readyq     []*pipe
+	cv         *sync.Cond
 	sync.Mutex
 }
 
@@ -73,7 +71,6 @@ func (s *socket) SendMsg(m *protocol.Message) error {
 
 	select {
 	case s.sendq <- m:
-		return nil
 	case <-s.closeq:
 		return protocol.ErrClosed
 	case <-tq:
@@ -83,76 +80,62 @@ func (s *socket) SendMsg(m *protocol.Message) error {
 		}
 		return protocol.ErrSendTimeout
 	}
+
+	s.Lock()
+	s.cv.Signal()
+	s.Unlock()
+	return nil
+}
+
+func (s *socket) sender() {
+	s.Lock()
+	defer s.Unlock()
+	for {
+		if s.closed {
+			return
+		}
+		if len(s.readyq) == 0 || len(s.sendq) == 0 {
+			s.cv.Wait()
+			continue
+		}
+		m := <-s.sendq
+		p := s.readyq[0]
+		s.readyq = s.readyq[1:]
+		go p.send(m)
+	}
 }
 
 func (s *socket) RecvMsg() (*protocol.Message, error) {
-	tq := nilQ
-	s.Lock()
-	if s.recvExpire > 0 {
-		tq = time.After(s.recvExpire)
-	}
-	s.Unlock()
-	select {
-	case <-s.closeq:
-		return nil, protocol.ErrClosed
-	case <-tq:
-		return nil, protocol.ErrRecvTimeout
-	case m := <-s.recvq:
-		return m, nil
-	}
+	return nil, protocol.ErrProtoOp
 }
 
 func (p *pipe) receiver() {
-	s := p.s
-outer:
 	for {
 		m := p.ep.RecvMsg()
 		if m == nil {
 			break
 		}
-
-		if len(m.Body) < 4 {
-			m.Free()
-			continue
-		}
-
-		m.Header = m.Body[:4]
-		m.Body = m.Body[4:]
-
-		select {
-		case s.recvq <- m:
-			continue
-		case <-s.closeq:
-			m.Free()
-			break outer
-		case <-p.closeq:
-			m.Free()
-			break outer
-		}
+		// We really never expected to receive this.
+		m.Free()
 	}
 	p.Close()
 }
 
-// This is a puller, and doesn't permit for priorities.  We might want
-// to refactor this to use a push based scheme later.
-func (p *pipe) sender() {
+func (p *pipe) send(m *protocol.Message) {
 	s := p.s
-outer:
-	for {
-		var m *protocol.Message
-		select {
-		case m = <-s.sendq:
-		case <-p.closeq:
-			break outer
-		case <-s.closeq:
-			break outer
-		}
-
-		if e := p.ep.SendMsg(m); e != nil {
-			break
+	if err := p.ep.SendMsg(m); err != nil {
+		m.Free()
+		if err == protocol.ErrClosed {
+			return
 		}
 	}
-	p.ep.Close()
+	s.Lock()
+	if !s.closed && !p.closed {
+		s.readyq = append(s.readyq, p)
+		s.cv.Broadcast()
+	}
+	s.Unlock()
+
 }
 
 func (p *pipe) Close() error {
@@ -163,6 +146,12 @@ func (p *pipe) Close() error {
 		return protocol.ErrClosed
 	}
 	p.closed = true
+	for i, rp := range s.readyq {
+		if p == rp {
+			s.readyq = append(s.readyq[:i], s.readyq[i+1:]...)
+			break
+		}
+	}
 	delete(s.pipes, p.ep.GetID())
 	s.Unlock()
 	close(p.closeq)
@@ -173,14 +162,6 @@ func (p *pipe) Close() error {
 func (s *socket) SetOption(name string, value interface{}) error {
 	switch name {
 
-	case protocol.OptionRecvDeadline:
-		if v, ok := value.(time.Duration); ok {
-			s.Lock()
-			s.recvExpire = v
-			s.Unlock()
-			return nil
-		}
-		return protocol.ErrBadValue
 	case protocol.OptionSendDeadline:
 		if v, ok := value.(time.Duration); ok {
 			s.Lock()
@@ -226,36 +207,7 @@ func (s *socket) SetOption(name string, value interface{}) error {
 			}
 		}
 		return protocol.ErrBadValue
-
-	case protocol.OptionReadQLen:
-		if v, ok := value.(int); ok && v >= 0 {
-			newchan := make(chan *protocol.Message, v)
-			s.Lock()
-			s.recvQLen = v
-			oldchan := s.recvq
-			s.recvq = newchan
-			s.Unlock()
-
-			for {
-				var m *protocol.Message
-				select {
-				case m = <-oldchan:
-				default:
-				}
-				if m == nil {
-					break
-				}
-				select {
-				case newchan <- m:
-				default:
-					m.Free()
-				}
-			}
-		}
-		// We don't support these
-		// case OptionLinger:
 	}
-
 	return protocol.ErrBadOption
 }
 
@@ -263,11 +215,6 @@ func (s *socket) GetOption(option string) (interface{}, error) {
 	switch option {
 	case protocol.OptionRaw:
 		return true, nil
-	case protocol.OptionRecvDeadline:
-		s.Lock()
-		v := s.recvExpire
-		s.Unlock()
-		return v, nil
 	case protocol.OptionSendDeadline:
 		s.Lock()
 		v := s.sendExpire
@@ -281,11 +228,6 @@ func (s *socket) GetOption(option string) (interface{}, error) {
 	case protocol.OptionWriteQLen:
 		s.Lock()
 		v := s.sendQLen
-		s.Unlock()
-		return v, nil
-	case protocol.OptionReadQLen:
-		s.Lock()
-		v := s.recvQLen
 		s.Unlock()
 		return v, nil
 	}
@@ -328,9 +270,10 @@ func (s *socket) AddPipe(ep protocol.Pipe) error {
 		closeq: make(chan struct{}),
 	}
 	s.pipes[ep.GetID()] = p
-
-	go p.sender()
 	go p.receiver()
+
+	s.readyq = append(s.readyq, p)
+	s.cv.Broadcast()
 	return nil
 }
 
@@ -354,10 +297,10 @@ func (*socket) Info() protocol.Info {
 // Info returns protocol information.
 func Info() protocol.Info {
 	return protocol.Info{
-		Self:     protocol.ProtoReq,
-		Peer:     protocol.ProtoRep,
-		SelfName: "req",
-		PeerName: "rep",
+		Self:     protocol.ProtoPush,
+		Peer:     protocol.ProtoPull,
+		SelfName: "push",
+		PeerName: "pull",
 	}
 }
 
@@ -366,11 +309,11 @@ func NewProtocol() protocol.Protocol {
 	s := &socket{
 		pipes:    make(map[uint32]*pipe),
 		closeq:   make(chan struct{}),
-		recvq:    make(chan *protocol.Message, defaultQLen),
 		sendq:    make(chan *protocol.Message, defaultQLen),
 		sendQLen: defaultQLen,
-		recvQLen: defaultQLen,
 	}
+	s.cv = sync.NewCond(s)
+	go s.sender()
 	return s
 }
 

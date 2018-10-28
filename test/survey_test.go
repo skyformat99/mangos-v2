@@ -22,6 +22,8 @@ import (
 	"nanomsg.org/go/mangos/v2"
 	"nanomsg.org/go/mangos/v2/protocol/respondent"
 	"nanomsg.org/go/mangos/v2/protocol/surveyor"
+	"nanomsg.org/go/mangos/v2/protocol/xrespondent"
+	"nanomsg.org/go/mangos/v2/protocol/xsurveyor"
 )
 
 type surveyTest struct {
@@ -164,26 +166,26 @@ func TestSurveyWSS(t *testing.T) {
 }
 
 func TestSurveyTTLZero(t *testing.T) {
-	SetTTLZero(t, respondent.NewRawSocket)
+	SetTTLZero(t, xrespondent.NewSocket)
 }
 
 func TestSurveyTTLNegative(t *testing.T) {
-	SetTTLNegative(t, respondent.NewRawSocket)
+	SetTTLNegative(t, xrespondent.NewSocket)
 }
 
 func TestSurveyTTLTooBig(t *testing.T) {
-	SetTTLTooBig(t, respondent.NewRawSocket)
+	SetTTLTooBig(t, xrespondent.NewSocket)
 }
 
 func TestSurveyTTLNotInt(t *testing.T) {
-	SetTTLNotInt(t, respondent.NewRawSocket)
+	SetTTLNotInt(t, xrespondent.NewSocket)
 }
 
 func TestSurveyTTLSet(t *testing.T) {
-	SetTTL(t, respondent.NewRawSocket)
+	SetTTL(t, xrespondent.NewSocket)
 }
 
 func TestSurveyTTLDrop(t *testing.T) {
 	TTLDropTest(t, surveyor.NewSocket, respondent.NewSocket,
-		surveyor.NewRawSocket, respondent.NewRawSocket)
+		xsurveyor.NewSocket, xrespondent.NewSocket)
 }

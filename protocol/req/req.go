@@ -199,7 +199,7 @@ func (c *context) unscheduleSend() {
 		c.wantw = false
 		for i, c2 := range s.sendq {
 			if c2 == c {
-				s.sendq = append(s.sendq[0:i-1],
+				s.sendq = append(s.sendq[:i],
 					s.sendq[i+1:]...)
 				return
 			}
@@ -458,9 +458,9 @@ func (s *socket) RecvMsg() (*protocol.Message, error) {
 
 func (s *socket) Close() error {
 	s.Lock()
-	defer s.Unlock()
 
 	if s.closed {
+		s.Unlock()
 		return protocol.ErrClosed
 	}
 	s.closed = true
@@ -469,9 +469,15 @@ func (s *socket) Close() error {
 		c.cancel()
 		delete(s.ctxs, c)
 	}
-	// close and remove each and every pipe
+	pipes := make([]*pipe, 0, len(s.pipes))
 	for _, p := range s.pipes {
-		go p.Close()
+		pipes = append(pipes, p)
+	}
+
+	s.Unlock()
+	// close and remove each and every pipe
+	for _, p := range pipes {
+		p.Close()
 	}
 	return nil
 }
@@ -519,6 +525,11 @@ func (s *socket) RemovePipe(ep protocol.Pipe) {
 		p.closed = true
 		ep.Close()
 		delete(s.pipes, ep.GetID())
+		for i, rp := range s.readyq {
+			if p == rp {
+				s.readyq = append(s.readyq[:i], s.readyq[i+1:]...)
+			}
+		}
 		for c := range s.ctxs {
 			if c.lastPipe == p {
 				// We are closing this pipe, so we need to
@@ -559,6 +570,7 @@ func NewProtocol() protocol.Protocol {
 		cond:       sync.NewCond(s),
 		resendTime: time.Minute,
 	}
+	s.ctxs[s.defCtx] = struct{}{}
 	return s
 }
 

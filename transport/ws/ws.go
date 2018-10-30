@@ -147,10 +147,6 @@ func (w *wsPipe) Send(m *mangos.Message) error {
 
 	var buf []byte
 
-	if m.Expired() {
-		m.Free()
-		return nil
-	}
 	if len(m.Header) > 0 {
 		buf = make([]byte, 0, len(m.Header)+len(m.Body))
 		buf = append(buf, m.Header...)
@@ -176,16 +172,12 @@ func (w *wsPipe) RemoteProtocol() uint16 {
 func (w *wsPipe) Close() error {
 	w.Lock()
 	defer w.Unlock()
-	if w.IsOpen() {
+	if w.open {
 		w.open = false
 		w.ws.Close()
 		w.wg.Done()
 	}
 	return nil
-}
-
-func (w *wsPipe) IsOpen() bool {
-	return w.open
 }
 
 func (w *wsPipe) GetOption(name string) (interface{}, error) {

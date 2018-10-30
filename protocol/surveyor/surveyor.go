@@ -25,6 +25,14 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol"
 )
 
+// Protocol identity information.
+const (
+	Self     = protocol.ProtoSurveyor
+	Peer     = protocol.ProtoRespondent
+	SelfName = "surveyor"
+	PeerName = "respondent"
+)
+
 const defaultSurveyTime = time.Second
 
 type pipe struct {
@@ -236,7 +244,7 @@ func (p *pipe) Close() error {
 		return protocol.ErrClosed
 	}
 	p.closed = true
-	delete(p.s.pipes, p.p.GetID())
+	delete(p.s.pipes, p.p.ID())
 	p.s.Unlock()
 
 	close(p.closeq)
@@ -328,7 +336,7 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 	if s.closed {
 		return protocol.ErrClosed
 	}
-	s.pipes[p.p.GetID()] = p
+	s.pipes[p.p.ID()] = p
 	go p.receiver()
 	go p.sender()
 	return nil
@@ -337,12 +345,12 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 func (s *socket) RemovePipe(pp protocol.Pipe) {
 	s.Lock()
 	defer s.Unlock()
-	p := s.pipes[pp.GetID()]
+	p := s.pipes[pp.ID()]
 	if p != nil && p.p == pp && !p.closed {
 		p.closed = true
 		close(p.closeq)
 		pp.Close()
-		delete(s.pipes, pp.GetID())
+		delete(s.pipes, pp.ID())
 	}
 }
 
@@ -406,16 +414,11 @@ func (s *socket) SetOption(option string, value interface{}) error {
 }
 
 func (*socket) Info() protocol.Info {
-	return Info()
-}
-
-// Info returns protocol information.
-func Info() protocol.Info {
 	return protocol.Info{
-		Self:     protocol.ProtoSurveyor,
-		Peer:     protocol.ProtoRespondent,
-		SelfName: "surveyor",
-		PeerName: "respondent",
+		Self:     Self,
+		Peer:     Peer,
+		SelfName: SelfName,
+		PeerName: PeerName,
 	}
 }
 

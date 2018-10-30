@@ -20,7 +20,7 @@ package protocol
 import (
 	"nanomsg.org/go/mangos/v2"
 	"nanomsg.org/go/mangos/v2/errors"
-	"nanomsg.org/go/mangos/v2/impl"
+	"nanomsg.org/go/mangos/v2/internal/core"
 )
 
 // Protocol numbers
@@ -39,7 +39,7 @@ const (
 )
 
 // Pipe is a single connection -- provided by the transport layer.
-type Pipe = mangos.Endpoint
+type Pipe = mangos.ProtocolPipe
 
 // Info describes a protocol and it's peer.
 type Info = mangos.ProtocolInfo
@@ -88,5 +88,5 @@ const (
 
 // MakeSocket creates a Socket on top of a Protocol.
 func MakeSocket(proto Protocol) Socket {
-	return impl.MakeSocket(proto)
+	return core.MakeSocket(proto)
 }

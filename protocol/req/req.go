@@ -25,8 +25,16 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol"
 )
 
+// Protocol identity information.
+const (
+	Self     = protocol.ProtoReq
+	Peer     = protocol.ProtoRep
+	SelfName = "req"
+	PeerName = "rep"
+)
+
 type pipe struct {
-	ep     protocol.Pipe
+	p      protocol.Pipe
 	s      *socket
 	closed bool
 }
@@ -100,7 +108,7 @@ func (p *pipe) sendCtx(c *context, m *protocol.Message) {
 
 	// Send this message.  If an error occurs, we examine the
 	// error.  If it is ErrClosed, we don't schedule ourself.
-	if err := p.ep.SendMsg(m); err != nil {
+	if err := p.p.SendMsg(m); err != nil {
 		m.Free()
 		if err == protocol.ErrClosed {
 			return
@@ -117,7 +125,7 @@ func (p *pipe) sendCtx(c *context, m *protocol.Message) {
 func (p *pipe) receiver() {
 	s := p.s
 	for {
-		m := p.ep.RecvMsg()
+		m := p.p.RecvMsg()
 		if m == nil {
 			break
 		}
@@ -160,7 +168,7 @@ func (p *pipe) Close() error {
 		return protocol.ErrClosed
 	}
 	p.closed = true
-	delete(s.pipes, p.ep.GetID())
+	delete(s.pipes, p.p.ID())
 
 	for c := range s.ctxs {
 		if c.lastPipe == p {
@@ -174,7 +182,7 @@ func (p *pipe) Close() error {
 	}
 
 	s.Unlock()
-	p.ep.Close()
+	p.p.Close()
 	return nil
 }
 
@@ -500,31 +508,31 @@ func (s *socket) OpenContext() (protocol.Context, error) {
 	return c, nil
 }
 
-func (s *socket) AddPipe(ep protocol.Pipe) error {
+func (s *socket) AddPipe(pp protocol.Pipe) error {
 	p := &pipe{
-		ep: ep,
-		s:  s,
+		p: pp,
+		s: s,
 	}
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
 		return protocol.ErrClosed
 	}
-	s.pipes[ep.GetID()] = p
+	s.pipes[pp.ID()] = p
 	s.readyq = append(s.readyq, p)
 	s.send()
 	go p.receiver()
 	return nil
 }
 
-func (s *socket) RemovePipe(ep protocol.Pipe) {
+func (s *socket) RemovePipe(pp protocol.Pipe) {
 	s.Lock()
-	defer s.Unlock()
-	p := s.pipes[ep.GetID()]
-	if p != nil && p.ep == ep {
+	var pipes []*pipe
+	p := s.pipes[pp.ID()]
+	if p != nil && p.p == pp {
 		p.closed = true
-		ep.Close()
-		delete(s.pipes, ep.GetID())
+		pipes = append(pipes, p)
+		delete(s.pipes, pp.ID())
 		for i, rp := range s.readyq {
 			if p == rp {
 				s.readyq = append(s.readyq[:i], s.readyq[i+1:]...)
@@ -541,19 +549,18 @@ func (s *socket) RemovePipe(ep protocol.Pipe) {
 			}
 		}
 	}
+	s.Unlock()
+	for _, p := range pipes {
+		p.Close()
+	}
 }
 
 func (*socket) Info() protocol.Info {
-	return Info()
-}
-
-// Info returns information about this protocol.
-func Info() protocol.Info {
 	return protocol.Info{
-		Self:     protocol.ProtoReq,
-		Peer:     protocol.ProtoRep,
-		SelfName: "req",
-		PeerName: "rep",
+		Self:     Self,
+		Peer:     Peer,
+		SelfName: SelfName,
+		PeerName: PeerName,
 	}
 }
 

@@ -23,8 +23,16 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol"
 )
 
+// Protocol identity information.
+const (
+	Self     = protocol.ProtoReq
+	Peer     = protocol.ProtoRep
+	SelfName = "req"
+	PeerName = "rep"
+)
+
 type pipe struct {
-	ep     protocol.Pipe
+	p      protocol.Pipe
 	s      *socket
 	closed bool
 	closeq chan struct{}
@@ -106,7 +114,7 @@ func (p *pipe) receiver() {
 	s := p.s
 outer:
 	for {
-		m := p.ep.RecvMsg()
+		m := p.p.RecvMsg()
 		if m == nil {
 			break
 		}
@@ -148,11 +156,11 @@ outer:
 			break outer
 		}
 
-		if e := p.ep.SendMsg(m); e != nil {
+		if e := p.p.SendMsg(m); e != nil {
 			break
 		}
 	}
-	p.ep.Close()
+	p.p.Close()
 }
 
 func (p *pipe) Close() error {
@@ -163,10 +171,10 @@ func (p *pipe) Close() error {
 		return protocol.ErrClosed
 	}
 	p.closed = true
-	delete(s.pipes, p.ep.GetID())
+	delete(s.pipes, p.p.ID())
 	s.Unlock()
 	close(p.closeq)
-	p.ep.Close()
+	p.p.Close()
 	return nil
 }
 
@@ -316,29 +324,29 @@ func (s *socket) Close() error {
 	return nil
 }
 
-func (s *socket) AddPipe(ep protocol.Pipe) error {
+func (s *socket) AddPipe(pp protocol.Pipe) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
 		return protocol.ErrClosed
 	}
 	p := &pipe{
-		ep:     ep,
+		p:      pp,
 		s:      s,
 		closeq: make(chan struct{}),
 	}
-	s.pipes[ep.GetID()] = p
+	s.pipes[pp.ID()] = p
 
 	go p.sender()
 	go p.receiver()
 	return nil
 }
 
-func (s *socket) RemovePipe(ep protocol.Pipe) {
+func (s *socket) RemovePipe(pp protocol.Pipe) {
 	s.Lock()
-	p, ok := s.pipes[ep.GetID()]
+	p, ok := s.pipes[pp.ID()]
 	s.Unlock()
-	if ok && p.ep == ep {
+	if ok && p.p == pp {
 		p.Close()
 	}
 }
@@ -348,16 +356,11 @@ func (s *socket) OpenContext() (protocol.Context, error) {
 }
 
 func (*socket) Info() protocol.Info {
-	return Info()
-}
-
-// Info returns protocol information.
-func Info() protocol.Info {
 	return protocol.Info{
-		Self:     protocol.ProtoReq,
-		Peer:     protocol.ProtoRep,
-		SelfName: "req",
-		PeerName: "rep",
+		Self:     Self,
+		Peer:     Peer,
+		SelfName: SelfName,
+		PeerName: PeerName,
 	}
 }
 

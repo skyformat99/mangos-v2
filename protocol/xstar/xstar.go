@@ -26,6 +26,14 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol"
 )
 
+// Protocol identity information.
+const (
+	Self     = protocol.ProtoStar
+	Peer     = protocol.ProtoStar
+	SelfName = "star"
+	PeerName = "star"
+)
+
 type pipe struct {
 	p      protocol.Pipe
 	s      *socket
@@ -76,7 +84,7 @@ func (s *socket) SendMsg(m *protocol.Message) error {
 
 		// Don't deliver the message back up to the same pipe it
 		// arrived from.
-		if p.p.GetID() == id {
+		if p.p.ID() == id {
 			continue
 		}
 		pm := m.Dup()
@@ -217,7 +225,7 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 		closeq: make(chan struct{}),
 		sendq:  make(chan *protocol.Message, s.sendQLen),
 	}
-	s.pipes[pp.GetID()] = p
+	s.pipes[pp.ID()] = p
 
 	go p.sender()
 	go p.receiver()
@@ -226,7 +234,7 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 
 func (s *socket) RemovePipe(pp protocol.Pipe) {
 	s.Lock()
-	p, ok := s.pipes[pp.GetID()]
+	p, ok := s.pipes[pp.ID()]
 	s.Unlock()
 	if ok && p.p == pp {
 		p.Close()
@@ -238,7 +246,12 @@ func (s *socket) OpenContext() (protocol.Context, error) {
 }
 
 func (*socket) Info() protocol.Info {
-	return Info()
+	return protocol.Info{
+		Self:     Self,
+		Peer:     Peer,
+		SelfName: SelfName,
+		PeerName: PeerName,
+	}
 }
 
 func (s *socket) Close() error {
@@ -353,22 +366,12 @@ func (p *pipe) Close() error {
 		return protocol.ErrClosed
 	}
 	p.closed = true
-	delete(p.s.pipes, p.p.GetID())
+	delete(p.s.pipes, p.p.ID())
 	p.s.Unlock()
 
 	close(p.closeq)
 	p.p.Close()
 	return nil
-}
-
-// Info returns protocol information.
-func Info() protocol.Info {
-	return protocol.Info{
-		Self:     protocol.ProtoStar,
-		Peer:     protocol.ProtoStar,
-		SelfName: "star",
-		PeerName: "star",
-	}
 }
 
 // NewProtocol returns a new protocol implementation.

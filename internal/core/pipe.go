@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package impl
+package core
 
 import (
 	"math/rand"
@@ -33,7 +33,7 @@ var pipes struct {
 }
 
 // pipe wraps the Pipe data structure with the stuff we need to keep
-// for the core.  It implements the Endpoint interface.
+// for the core.  It implements the Pipe interface.
 type pipe struct {
 	sync.Mutex
 	id     uint32
@@ -72,7 +72,7 @@ func newPipe(tp transport.Pipe, s *socket, d *dialer, l *listener) *pipe {
 	return p
 }
 
-func (p *pipe) GetID() uint32 {
+func (p *pipe) ID() uint32 {
 	return p.id
 }
 
@@ -122,7 +122,7 @@ func (p *pipe) RecvMsg() *mangos.Message {
 		p.Close()
 		return nil
 	}
-	msg.Port = p
+	msg.Pipe = p
 	return msg
 }
 
@@ -137,33 +137,27 @@ func (p *pipe) Address() string {
 }
 
 func (p *pipe) GetOption(name string) (interface{}, error) {
-	return p.p.GetOption(name)
-}
-
-func (p *pipe) IsOpen() bool {
-	return p.p.IsOpen()
-}
-
-func (p *pipe) IsClient() bool {
-	return p.d != nil
-}
-
-func (p *pipe) IsServer() bool {
-	return p.l != nil
-}
-
-func (p *pipe) LocalProtocol() uint16 {
-	return p.p.LocalProtocol()
-}
-
-func (p *pipe) RemoteProtocol() uint16 {
-	return p.p.RemoteProtocol()
+	val, err := p.p.GetOption(name)
+	if err == mangos.ErrBadOption {
+		if p.d != nil {
+			val, err = p.d.GetOption(name)
+		} else if p.l != nil {
+			val, err = p.l.GetOption(name)
+		}
+	}
+	return val, err
 }
 
 func (p *pipe) Dialer() mangos.Dialer {
+	if p.d == nil {
+		return nil
+	}
 	return p.d
 }
 
 func (p *pipe) Listener() mangos.Listener {
+	if p.l == nil {
+		return nil
+	}
 	return p.l
 }

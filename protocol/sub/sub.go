@@ -30,6 +30,14 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol"
 )
 
+// Protocol identity information.
+const (
+	Self     = protocol.ProtoSub
+	Peer     = protocol.ProtoPub
+	SelfName = "sub"
+	PeerName = "pub"
+)
+
 type socket struct {
 	master *context
 	ctxs   map[*context]struct{}
@@ -137,7 +145,7 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 	if s.closed {
 		return protocol.ErrClosed
 	}
-	s.pipes[p.p.GetID()] = p
+	s.pipes[p.p.ID()] = p
 	go p.receiver()
 	return nil
 }
@@ -145,11 +153,11 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 func (s *socket) RemovePipe(pp protocol.Pipe) {
 	s.Lock()
 	defer s.Unlock()
-	p := s.pipes[pp.GetID()]
+	p := s.pipes[pp.ID()]
 	if p != nil && p.p == pp && !p.closed {
 		p.closed = true
 		pp.Close()
-		delete(s.pipes, pp.GetID())
+		delete(s.pipes, pp.ID())
 	}
 }
 
@@ -175,16 +183,6 @@ func (s *socket) Close() error {
 		p.Close()
 	}
 	return nil
-}
-
-// Info returns protocol information.
-func Info() protocol.Info {
-	return protocol.Info{
-		Self:     protocol.ProtoSub,
-		Peer:     protocol.ProtoPub,
-		SelfName: "sub",
-		PeerName: "pub",
-	}
 }
 
 func (p *pipe) Close() error {
@@ -337,7 +335,12 @@ func (s *socket) SetOption(name string, val interface{}) error {
 }
 
 func (s *socket) Info() protocol.Info {
-	return Info()
+	return protocol.Info{
+		Self:     Self,
+		Peer:     Peer,
+		SelfName: SelfName,
+		PeerName: PeerName,
+	}
 }
 
 // NewProtocol returns a new protocol implementation.

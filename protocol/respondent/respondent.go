@@ -23,6 +23,14 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol"
 )
 
+// Protocol identity information.
+const (
+	Self     = protocol.ProtoRespondent
+	Peer     = protocol.ProtoSurveyor
+	SelfName = "respondent"
+	PeerName = "surveyor"
+)
+
 type pipe struct {
 	s      *socket
 	p      protocol.Pipe
@@ -353,14 +361,19 @@ func (s *socket) Close() error {
 }
 
 func (*socket) Info() protocol.Info {
-	return Info()
+	return protocol.Info{
+		Self:     Self,
+		Peer:     Peer,
+		SelfName: SelfName,
+		PeerName: PeerName,
+	}
 }
 
-func (s *socket) AddPipe(ep protocol.Pipe) error {
+func (s *socket) AddPipe(pp protocol.Pipe) error {
 
 	s.Lock()
 	p := &pipe{
-		p:      ep,
+		p:      pp,
 		s:      s,
 		sendQ:  make(chan *protocol.Message, s.sendQLen),
 		closeQ: make(chan struct{}),
@@ -369,18 +382,18 @@ func (s *socket) AddPipe(ep protocol.Pipe) error {
 		s.Unlock()
 		return protocol.ErrClosed
 	}
-	s.pipes[ep.GetID()] = p
+	s.pipes[pp.ID()] = p
 	go p.sender()
 	go p.receiver()
 	s.Unlock()
 	return nil
 }
 
-func (s *socket) RemovePipe(ep protocol.Pipe) {
+func (s *socket) RemovePipe(pp protocol.Pipe) {
 
 	s.Lock()
-	if p, ok := s.pipes[ep.GetID()]; ok {
-		delete(s.pipes, ep.GetID())
+	if p, ok := s.pipes[pp.ID()]; ok {
+		delete(s.pipes, pp.ID())
 		go p.close()
 	}
 	s.Unlock()
@@ -448,16 +461,6 @@ func (s *socket) RecvMsg() (*protocol.Message, error) {
 
 func (s *socket) SendMsg(m *protocol.Message) error {
 	return s.defCtx.SendMsg(m)
-}
-
-// Info returns protocol information.
-func Info() protocol.Info {
-	return protocol.Info{
-		Self:     protocol.ProtoRespondent,
-		Peer:     protocol.ProtoSurveyor,
-		SelfName: "respondent",
-		PeerName: "surveyor",
-	}
 }
 
 // NewProtocol allocates a protocol state for the RESPONDENT protocol.

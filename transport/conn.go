@@ -74,11 +74,6 @@ func (p *conn) Send(msg *Message) error {
 
 	l := uint64(len(msg.Header) + len(msg.Body))
 
-	if msg.Expired() {
-		msg.Free()
-		return nil
-	}
-
 	// send length header
 	if err := binary.Write(p.c, binary.BigEndian, l); err != nil {
 		return err
@@ -108,16 +103,11 @@ func (p *conn) RemoteProtocol() uint16 {
 func (p *conn) Close() error {
 	p.Lock()
 	defer p.Unlock()
-	if p.IsOpen() {
+	if p.open {
 		p.open = false
 		return p.c.Close()
 	}
 	return nil
-}
-
-// IsOpen implements the Pipe IsOpen method.
-func (p *conn) IsOpen() bool {
-	return p.open
 }
 
 func (p *conn) GetOption(n string) (interface{}, error) {
@@ -143,7 +133,7 @@ func NewConnPipe(c net.Conn, proto ProtocolInfo, options map[string]interface{})
 		options: make(map[string]interface{}),
 	}
 
-	p.options[mangos.OptionMaxRecvSize] = int64(0)
+	p.options[mangos.OptionMaxRecvSize] = int(0)
 	p.options[mangos.OptionLocalAddr] = p.c.LocalAddr()
 	p.options[mangos.OptionRemoteAddr] = p.c.RemoteAddr()
 	for n, v := range options {

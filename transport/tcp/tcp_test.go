@@ -24,7 +24,7 @@ import (
 	"nanomsg.org/go/mangos/v2/protocol/req"
 )
 
-var tran = NewTransport()
+var tran = Transport
 var sockRep, _ = rep.NewSocket()
 var sockReq, _ = req.NewSocket()
 
@@ -180,6 +180,10 @@ func TestTCPSendRecv(t *testing.T) {
 		// Client side
 		t.Logf("Connecting")
 		d, err := tran.NewDialer(addr, sockReq)
+		if err != nil {
+			t.Errorf("Failed creating dialer: %v", err)
+			return
+		}
 
 		client, err := d.Dial()
 		if err != nil {

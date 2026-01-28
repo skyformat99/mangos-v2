@@ -40,12 +40,12 @@ import (
 	"os"
 	"time"
 
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/protocol/rep"
-	"nanomsg.org/go/mangos/v2/protocol/req"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/protocol/rep"
+	"go.nanomsg.org/mangos/v3/protocol/req"
 
 	// register transports
-	_ "nanomsg.org/go/mangos/v2/transport/all"
+	_ "go.nanomsg.org/mangos/v3/transport/all"
 )
 
 func die(format string, v ...interface{}) {
@@ -89,6 +89,9 @@ func server(url string) {
 				die("can't create context on rep socket: %s", err)
 			}
 			msg, err = ctx.Recv()
+			if err != nil {
+				die("can't receive from context: %s", err)
+			}
 			fmt.Printf("Worker %d: Received request '%s'\n", id, string(msg))
 
 			// Sleep for a random amount of time to simulate "work"

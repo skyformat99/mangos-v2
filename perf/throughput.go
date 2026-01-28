@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package perf provides utilities to measure mangos peformance against
-// libnanomsg' perf tools.
-
 package main
 
 import (
@@ -22,9 +19,8 @@ import (
 	"log"
 	"time"
 
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/protocol/pair"
-	"nanomsg.org/go/mangos/v2/transport/all"
+	"go.nanomsg.org/mangos/v3/protocol/pair"
+	"go.nanomsg.org/mangos/v3/transport/all"
 )
 
 // ThroughputServer is the server side -- very much equivalent to local_thr in
@@ -34,7 +30,9 @@ func ThroughputServer(addr string, msgSize int, count int) {
 	if err != nil {
 		log.Fatalf("Failed to make new pair socket: %v", err)
 	}
-	defer s.Close()
+	defer func() {
+		_ = s.Close()
+	}()
 
 	all.AddTransports(s)
 	l, err := s.NewListener(addr, nil)
@@ -42,11 +40,7 @@ func ThroughputServer(addr string, msgSize int, count int) {
 		log.Fatalf("Failed to make new listener: %v", err)
 	}
 
-	// Disable TCP no delay, please! - only valid for TCP
-	l.SetOption(mangos.OptionNoDelay, false)
-
-	err = l.Listen()
-	if err != nil {
+	if err = l.Listen(); err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
@@ -90,16 +84,15 @@ func ThroughputClient(addr string, msgSize int, count int) {
 	if err != nil {
 		log.Fatalf("Failed to make new pair socket: %v", err)
 	}
-	defer s.Close()
+	defer func() {
+		_ = s.Close()
+	}()
 
 	all.AddTransports(s)
 	d, err := s.NewDialer(addr, nil)
 	if err != nil {
 		log.Fatalf("Failed to make new dialer: %v", err)
 	}
-
-	// Disable TCP no delay, please!
-	d.SetOption(mangos.OptionNoDelay, false)
 
 	err = d.Dial()
 	if err != nil {
@@ -115,7 +108,7 @@ func ThroughputClient(addr string, msgSize int, count int) {
 	}
 
 	// send the start message
-	s.Send([]byte{})
+	_ = s.Send([]byte{})
 
 	for i := 0; i < count; i++ {
 		if err = s.Send(body); err != nil {

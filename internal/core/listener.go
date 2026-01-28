@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/transport"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/transport"
 )
 
 type listener struct {
@@ -28,6 +28,7 @@ type listener struct {
 	s      *socket
 	addr   string
 	closed bool
+	active bool
 }
 
 func (l *listener) GetOption(n string) (interface{}, error) {
@@ -70,7 +71,21 @@ func (l *listener) Listen() error {
 	// as we assume that we want to continue to receive inbound
 	// connections without limit.
 
+	l.Lock()
+	if l.closed {
+		l.Unlock()
+		return mangos.ErrClosed
+	}
+	if l.active {
+		l.Unlock()
+		return mangos.ErrAddrInUse
+	}
+	l.active = true
+	l.Unlock()
 	if err := l.l.Listen(); err != nil {
+		l.Lock()
+		l.active = false
+		l.Unlock()
 		return err
 	}
 

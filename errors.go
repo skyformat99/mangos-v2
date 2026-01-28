@@ -1,4 +1,4 @@
-// Copyright 2018 The Mangos Authors
+// Copyright 2021 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -15,7 +15,7 @@
 package mangos
 
 import (
-	"nanomsg.org/go/mangos/v2/errors"
+	"go.nanomsg.org/mangos/v3/errors"
 )
 
 // Various error codes.
@@ -43,4 +43,5 @@ const (
 	ErrNotRaw      = errors.ErrNotRaw
 	ErrCanceled    = errors.ErrCanceled
 	ErrNoContext   = errors.ErrNoContext
+	ErrNoPeers     = errors.ErrNoPeers
 )

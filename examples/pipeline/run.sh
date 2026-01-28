@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Copyright 2014 The Mangos Authors
+# Copyright 2019 The Mangos Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use file except in compliance with the License.
@@ -15,7 +15,8 @@
 # limitations under the License.
 
 url=tcp://127.0.0.1:40899
-./pipeline node0 $url & node0=$! && sleep 1
-./pipeline node1 $url "Hello, World."
-./pipeline node1 $url "Goodbye."
-kill $node0
+go run pipeline.go node0 $url
+sleep 1
+go run pipeline.go node1 $url "Hello, World."
+go run pipeline.go node1 $url "Goodbye."
+go run pipeline.go node1 $url "STOP"

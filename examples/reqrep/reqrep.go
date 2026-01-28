@@ -30,12 +30,12 @@ import (
 	"os"
 	"time"
 
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/protocol/rep"
-	"nanomsg.org/go/mangos/v2/protocol/req"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/protocol/rep"
+	"go.nanomsg.org/mangos/v3/protocol/req"
 
 	// register transports
-	_ "nanomsg.org/go/mangos/v2/transport/all"
+	_ "go.nanomsg.org/mangos/v3/transport/all"
 )
 
 func die(format string, v ...interface{}) {
@@ -60,6 +60,9 @@ func node0(url string) {
 	for {
 		// Could also use sock.RecvMsg to get header
 		msg, err = sock.Recv()
+		if err != nil {
+			die("cannot receive on rep socket: %s", err.Error())
+		}
 		if string(msg) == "DATE" { // no need to terminate
 			fmt.Println("NODE0: RECEIVED DATE REQUEST")
 			d := date()

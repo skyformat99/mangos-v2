@@ -1,6 +1,7 @@
+//go:build windows
 // +build windows
 
-// Copyright 2018 The Mangos Authors
+// Copyright 2020 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -20,10 +21,12 @@ package ipc
 
 import (
 	"net"
+	"sync"
 
 	"github.com/Microsoft/go-winio"
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/transport"
+
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/transport"
 )
 
 const Transport = ipcTran(0)
@@ -32,32 +35,12 @@ func init() {
 	transport.RegisterTransport(Transport)
 }
 
-// The options here are pretty specific to Windows Named Pipes.
-
-const (
-	// OptionSecurityDescriptor represents a Windows security
-	// descriptor in SDDL format (string).  This can only be set on
-	// a Listener, and must be set before the Listen routine
-	// is called.
-	OptionSecurityDescriptor = "WIN-IPC-SECURITY-DESCRIPTOR"
-
-	// OptionInputBufferSize represents the Windows Named Pipe
-	// input buffer size in bytes (type int32).  Default is 4096.
-	// This is only for Listeners, and must be set before the
-	// Listener is started.
-	OptionInputBufferSize = "WIN-IPC-INPUT-BUFFER-SIZE"
-
-	// OptionOutputBufferSize represents the Windows Named Pipe
-	// output buffer size in bytes (type int32).  Default is 4096.
-	// This is only for Listeners, and must be set before the
-	// Listener is started.
-	OptionOutputBufferSize = "WIN-IPC-OUTPUT-BUFFER-SIZE"
-)
-
 type dialer struct {
-	path  string
-	proto transport.ProtocolInfo
-	opts  map[string]interface{}
+	path        string
+	proto       transport.ProtocolInfo
+	hs          transport.Handshaker
+	recvMaxSize int
+	lock        sync.Mutex
 }
 
 // Dial implements the PipeDialer Dial method.
@@ -67,41 +50,98 @@ func (d *dialer) Dial() (transport.Pipe, error) {
 	if err != nil {
 		return nil, err
 	}
-	return transport.NewConnPipeIPC(conn, d.proto, d.opts)
+	p := transport.NewConnPipeIPC(conn, d.proto)
+	d.lock.Lock()
+	mrs := d.recvMaxSize
+	d.lock.Unlock()
+	p.SetOption(mangos.OptionMaxRecvSize, mrs)
+	d.hs.Start(p)
+	return d.hs.Wait()
 }
 
 // SetOption implements a stub PipeDialer SetOption method.
 func (d *dialer) SetOption(n string, v interface{}) error {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	switch n {
+	case mangos.OptionMaxRecvSize:
+		if val, ok := v.(int); ok {
+			d.recvMaxSize = val
+			return nil
+		}
+		return mangos.ErrBadValue
+	}
+
 	return mangos.ErrBadOption
 }
 
 // GetOption implements a stub PipeDialer GetOption method.
 func (d *dialer) GetOption(n string) (interface{}, error) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	switch n {
+	case mangos.OptionMaxRecvSize:
+		return d.recvMaxSize, nil
+	}
 	return nil, mangos.ErrBadOption
 }
 
 type listener struct {
-	path     string
-	proto    transport.ProtocolInfo
-	listener net.Listener
-	opts     map[string]interface{}
+	path             string
+	proto            transport.ProtocolInfo
+	listener         net.Listener
+	hs               transport.Handshaker
+	closed           bool
+	recvMaxSize      int
+	outputBufferSize int32
+	inputBufferSize  int32
+	securityDesc     string
+	once             sync.Once
+	lock             sync.Mutex
 }
 
 // Listen implements the PipeListener Listen method.
 func (l *listener) Listen() error {
 
+	l.lock.Lock()
 	config := &winio.PipeConfig{
-		InputBufferSize:    l.opts[OptionInputBufferSize].(int32),
-		OutputBufferSize:   l.opts[OptionOutputBufferSize].(int32),
-		SecurityDescriptor: l.opts[OptionSecurityDescriptor].(string),
+		InputBufferSize:    l.inputBufferSize,
+		OutputBufferSize:   l.outputBufferSize,
+		SecurityDescriptor: l.securityDesc,
 		MessageMode:        false,
 	}
+	if l.closed {
+		l.lock.Unlock()
+		return mangos.ErrClosed
+	}
+	l.lock.Unlock()
 
 	listener, err := winio.ListenPipe("\\\\.\\pipe\\"+l.path, config)
 	if err != nil {
 		return err
 	}
 	l.listener = listener
+	go func() {
+		for {
+			l.lock.Lock()
+			if l.closed {
+				l.lock.Unlock()
+				return
+			}
+			mrs := l.recvMaxSize
+			l.lock.Unlock()
+			conn, err := listener.Accept()
+			if err != nil {
+				// Generally this will be ErrClosed
+				continue
+			}
+			p := transport.NewConnPipeIPC(conn, l.proto)
+			p.SetOption(mangos.OptionMaxRecvSize, mrs)
+			l.hs.Start(p)
+		}
+	}()
 	return nil
 }
 
@@ -112,43 +152,55 @@ func (l *listener) Address() string {
 // Accept implements the the PipeListener Accept method.
 func (l *listener) Accept() (mangos.TranPipe, error) {
 
-	conn, err := l.listener.Accept()
-	if err != nil {
-		return nil, err
+	if l.listener == nil {
+		return nil, mangos.ErrClosed
 	}
-	return transport.NewConnPipeIPC(conn, l.proto, l.opts)
+	return l.hs.Wait()
 }
 
 // Close implements the PipeListener Close method.
 func (l *listener) Close() error {
-	if l.listener != nil {
-		l.listener.Close()
-	}
+	l.once.Do(func() {
+		l.lock.Lock()
+		l.closed = true
+		l.lock.Unlock()
+		if l.listener != nil {
+			_ = l.listener.Close()
+		}
+		l.hs.Close()
+	})
 	return nil
 }
 
 // SetOption implements a stub PipeListener SetOption method.
 func (l *listener) SetOption(name string, val interface{}) error {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+
 	switch name {
 	case OptionInputBufferSize:
-		fallthrough
+		if b, ok := val.(int32); ok {
+			l.inputBufferSize = b
+			return nil
+		}
+		return mangos.ErrBadValue
 	case OptionOutputBufferSize:
-		if v, ok := val.(int32); ok {
-			l.opts[name] = v
+		if b, ok := val.(int32); ok {
+			l.outputBufferSize = b
 			return nil
 		}
 		return mangos.ErrBadValue
 
 	case OptionSecurityDescriptor:
-		if v, ok := val.(string); ok {
-			l.opts[name] = v
+		if b, ok := val.(string); ok {
+			l.securityDesc = b
 			return nil
 		}
 		return mangos.ErrBadValue
 
 	case mangos.OptionMaxRecvSize:
-		if v, ok := val.(int); ok {
-			l.opts[name] = v
+		if b, ok := val.(int); ok {
+			l.recvMaxSize = b
 			return nil
 		}
 		return mangos.ErrBadValue
@@ -159,8 +211,17 @@ func (l *listener) SetOption(name string, val interface{}) error {
 
 // GetOption implements a stub PipeListener GetOption method.
 func (l *listener) GetOption(name string) (interface{}, error) {
-	if v, ok := l.opts[name]; ok {
-		return v, nil
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	switch name {
+	case mangos.OptionMaxRecvSize:
+		return l.recvMaxSize, nil
+	case OptionInputBufferSize:
+		return l.inputBufferSize, nil
+	case OptionOutputBufferSize:
+		return l.outputBufferSize, nil
+	case OptionSecurityDescriptor:
+		return l.securityDesc, nil
 	}
 	return nil, mangos.ErrBadOption
 }
@@ -183,10 +244,8 @@ func (t ipcTran) NewDialer(address string, sock mangos.Socket) (mangos.TranDiale
 	d := &dialer{
 		proto: sock.Info(),
 		path:  address,
-		opts:  make(map[string]interface{}),
+		hs:    transport.NewConnHandshaker(),
 	}
-
-	d.opts[mangos.OptionMaxRecvSize] = 0
 
 	return d, nil
 }
@@ -202,13 +261,13 @@ func (t ipcTran) NewListener(address string, sock mangos.Socket) (transport.List
 	l := &listener{
 		proto: sock.Info(),
 		path:  address,
-		opts:  make(map[string]interface{}),
+		hs:    transport.NewConnHandshaker(),
 	}
 
-	l.opts[OptionInputBufferSize] = int32(4096)
-	l.opts[OptionOutputBufferSize] = int32(4096)
-	l.opts[OptionSecurityDescriptor] = ""
-	l.opts[mangos.OptionMaxRecvSize] = 0
+	l.inputBufferSize = 4096
+	l.outputBufferSize = 4096
+	l.securityDesc = ""
+	l.recvMaxSize = 0
 
 	return l, nil
 }

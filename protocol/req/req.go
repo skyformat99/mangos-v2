@@ -1,4 +1,4 @@
-// Copyright 2018 The Mangos Authors
+// Copyright 2022 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nanomsg.org/go/mangos/v2/protocol"
+	"go.nanomsg.org/mangos/v3/protocol"
 )
 
 // Protocol identity information.
@@ -40,74 +40,74 @@ type pipe struct {
 }
 
 type context struct {
-	s          *socket
-	cond       *sync.Cond
-	resendTime time.Duration     // tunable resend time
-	sendExpire time.Duration     // how long to wait in send
-	recvExpire time.Duration     // how long to wait in recv
-	sendTimer  *time.Timer       // send timer
-	recvTimer  *time.Timer       // recv timer
-	resender   *time.Timer       // resend timeout
-	reqMsg     *protocol.Message // message for transmit
-	repMsg     *protocol.Message // received reply
-	sendMsg    *protocol.Message // messaging waiting for send
-	lastPipe   *pipe             // last pipe used for transmit
-	reqID      uint32            // request ID
-	sendID     uint32            // sent id (cleared after first send)
-	recvID     uint32            // recv id (set after first send)
-	recvWait   bool              // true if a thread is blocked in RecvMsg
-	bestEffort bool              // if true, don't block waiting in send
-	wantw      bool              // true if we need to send a message
-	closed     bool              // true if we are closed
+	s             *socket
+	cond          *sync.Cond
+	resendTime    time.Duration     // tunable resend time
+	sendExpire    time.Duration     // how long to wait in send
+	receiveExpire time.Duration     // how long to wait in receive
+	sendTimer     *time.Timer       // send timer
+	receiveTimer  *time.Timer       // receive timer
+	resendTimer   *time.Timer       // resend timeout
+	reqMsg        *protocol.Message // message for transmit
+	repMsg        *protocol.Message // received reply
+	sendMsg       *protocol.Message // messaging waiting for send
+	lastPipe      *pipe             // last pipe used for transmit
+	reqID         uint32            // request ID
+	receiveWait   bool              // true if a thread is blocked receiving
+	bestEffort    bool              // if true, don't block waiting in send
+	failNoPeers   bool              // fast fail if no peers present
+	queued        bool              // true if we need to send a message
+	closed        bool              // true if we are closed
 }
 
 type socket struct {
 	sync.Mutex
-	defCtx  *context              // default context
-	ctxs    map[*context]struct{} // all contexts (set)
-	ctxByID map[uint32]*context   // contexts by request ID
-	nextID  uint32                // next request ID
-	closed  bool                  // true if we are closed
-	sendq   []*context            // contexts waiting to send
-	readyq  []*pipe               // pipes available for sending
-	pipes   map[uint32]*pipe      // all pipes for the socket (by pipe ID)
+	defCtx   *context              // default context
+	contexts map[*context]struct{} // all contexts (set)
+	ctxByID  map[uint32]*context   // contexts by request ID
+	nextID   uint32                // next request ID
+	closed   bool                  // true if we are closed
+	sendQ    []*context            // contexts waiting to send
+	readyQ   []*pipe               // pipes available for sending
+	pipes    map[uint32]*pipe      // all pipes
 }
 
 func (s *socket) send() {
-	for len(s.sendq) != 0 && len(s.readyq) != 0 {
-		c := s.sendq[0]
-		s.sendq = s.sendq[1:]
-		c.wantw = false
+	for len(s.sendQ) != 0 && len(s.readyQ) != 0 {
+		c := s.sendQ[0]
+		s.sendQ = s.sendQ[1:]
+		c.queued = false
 
-		p := s.readyq[0]
-		s.readyq = s.readyq[1:]
-
-		if c.sendID != 0 {
-			c.reqMsg = c.sendMsg
+		var m *protocol.Message
+		if m = c.sendMsg; m != nil {
+			c.reqMsg = m
 			c.sendMsg = nil
-			c.recvID = c.sendID
-			s.ctxByID[c.recvID] = c
-			c.sendID = 0
+			s.ctxByID[c.reqID] = c
 			c.cond.Broadcast()
+		} else {
+			m = c.reqMsg
 		}
-		m := c.reqMsg.Dup()
+		m.Clone()
+		p := s.readyQ[0]
+		s.readyQ = s.readyQ[1:]
 
-		// Schedule a retransmit for the future.
+		// Schedule retransmission for the future.
 		c.lastPipe = p
 		if c.resendTime > 0 {
-			c.resender = time.AfterFunc(c.resendTime, func() {
-				c.resendMessage(m)
+			id := c.reqID
+			c.resendTimer = time.AfterFunc(c.resendTime, func() {
+				c.resendMessage(id)
 			})
 		}
 		go p.sendCtx(c, m)
 	}
 }
 
-func (p *pipe) sendCtx(c *context, m *protocol.Message) {
+func (p *pipe) sendCtx(_ *context, m *protocol.Message) {
 	s := p.s
 
 	// Send this message.  If an error occurs, we examine the
-	// error.  If it is ErrClosed, we don't schedule ourself.
+	// error.  If it is ErrClosed, we don't schedule our self.
 	if err := p.p.SendMsg(m); err != nil {
 		m.Free()
 		if err == protocol.ErrClosed {
@@ -115,8 +115,8 @@ func (p *pipe) sendCtx(c *context, m *protocol.Message) {
 		}
 	}
 	s.Lock()
-	if !c.closed && !p.closed {
-		s.readyq = append(s.readyq, p)
+	if !s.closed && !p.closed {
+		s.readyQ = append(s.readyQ, p)
 		s.send()
 	}
 	s.Unlock()
@@ -139,15 +139,29 @@ func (p *pipe) receiver() {
 		id := binary.BigEndian.Uint32(m.Header)
 
 		s.Lock()
+		// Since we just received a reply, stick our send at the
+		// head of the list, since that's a good indication that
+		// we're ready for another request.
+		for i, rp := range s.readyQ {
+			if p == rp {
+				s.readyQ[0], s.readyQ[i] = s.readyQ[i], s.readyQ[0]
+				break
+			}
+		}
+
 		if c, ok := s.ctxByID[id]; ok {
-			c.unscheduleSend()
+			c.cancelSend()
 			c.reqMsg.Free()
 			c.reqMsg = nil
 			c.repMsg = m
 			delete(s.ctxByID, id)
-			if c.resender != nil {
-				c.resender.Stop()
-				c.resender = nil
+			if c.resendTimer != nil {
+				c.resendTimer.Stop()
+				c.resendTimer = nil
+			}
+			if c.receiveTimer != nil {
+				c.receiveTimer.Stop()
+				c.receiveTimer = nil
 			}
 			c.cond.Broadcast()
 		} else {
@@ -160,64 +174,39 @@ func (p *pipe) receiver() {
 	go p.Close()
 }
 
-func (p *pipe) Close() error {
-	s := p.s
-	s.Lock()
-	if p.closed {
-		s.Unlock()
-		return protocol.ErrClosed
-	}
-	p.closed = true
-	delete(s.pipes, p.p.ID())
-
-	for c := range s.ctxs {
-		if c.lastPipe == p {
-			// We are closing this pipe, so we need to
-			// immediately reschedule it.
-			c.lastPipe = nil
-			if m := c.reqMsg; m != nil {
-				go c.resendMessage(m)
-			}
-		}
-	}
-
-	s.Unlock()
-	p.p.Close()
-	return nil
+func (p *pipe) Close() {
+	_ = p.p.Close()
 }
 
-func (c *context) resendMessage(m *protocol.Message) {
+func (c *context) resendMessage(id uint32) {
 	s := c.s
 	s.Lock()
 	defer s.Unlock()
-	if c.reqMsg != m {
-		return
+	if c.reqID == id && c.reqMsg != nil {
+		if !c.queued {
+			c.queued = true
+			s.sendQ = append(s.sendQ, c)
+			s.send()
+		}
 	}
-	if c.wantw {
-		return // already scheduled for some reason?
-	}
-	c.wantw = true
-	s.sendq = append(s.sendq, c)
-	s.send()
 }
 
-func (c *context) unscheduleSend() {
+func (c *context) cancelSend() {
 	s := c.s
-	if c.wantw {
-		c.wantw = false
-		for i, c2 := range s.sendq {
+	if c.queued {
+		c.queued = false
+		for i, c2 := range s.sendQ {
 			if c2 == c {
-				s.sendq = append(s.sendq[:i],
-					s.sendq[i+1:]...)
+				s.sendQ = append(s.sendQ[:i], s.sendQ[i+1:]...)
 				return
 			}
 		}
 	}
-
 }
+
 func (c *context) cancel() {
 	s := c.s
-	c.unscheduleSend()
+	c.cancelSend()
 	if c.reqID != 0 {
 		delete(s.ctxByID, c.reqID)
 		c.reqID = 0
@@ -230,20 +219,18 @@ func (c *context) cancel() {
 		c.reqMsg.Free()
 		c.reqMsg = nil
 	}
-	if c.resender != nil {
-		c.resender.Stop()
-		c.resender = nil
+	if c.resendTimer != nil {
+		c.resendTimer.Stop()
+		c.resendTimer = nil
 	}
 	if c.sendTimer != nil {
 		c.sendTimer.Stop()
 		c.sendTimer = nil
 	}
-	if c.recvTimer != nil {
-		c.recvTimer.Stop()
-		c.recvTimer = nil
+	if c.receiveTimer != nil {
+		c.receiveTimer.Stop()
+		c.receiveTimer = nil
 	}
-	c.sendID = 0
-	c.recvID = 0
 	c.cond.Broadcast()
 }
 
@@ -264,33 +251,34 @@ func (c *context) SendMsg(m *protocol.Message) error {
 		return protocol.ErrClosed
 	}
 
-	c.cancel() // this cancels any pending send or recv calls
+	if c.failNoPeers && len(s.pipes) == 0 {
+		return protocol.ErrNoPeers
+	}
+	c.cancel() // this cancels any pending send or receive calls
+	c.cancelSend()
 
 	c.reqID = id
-	s.ctxByID[id] = c
-	c.wantw = true
-	s.sendq = append(s.sendq, c)
+	c.queued = true
+	c.sendMsg = m
+
+	s.sendQ = append(s.sendQ, c)
 
 	if c.bestEffort {
 		// for best effort case, we just immediately go the
-		// reqMsg, and schedule it as a send.  No waiting.
+		// reqMsg, and schedule sending.  No waiting.
 		// This means that if the message cannot be delivered
 		// immediately, it will still get a chance later.
-		c.reqMsg = m
-		c.recvID = id
 		s.send()
 		return nil
 	}
 
 	expired := false
-	c.sendID = id
-	c.sendMsg = m
 	if c.sendExpire > 0 {
 		c.sendTimer = time.AfterFunc(c.sendExpire, func() {
 			s.Lock()
-			if c.sendID == id {
+			if c.sendMsg == m {
 				expired = true
-				c.cancel() // also does a wake up
+				c.cancel() // also does a wake-up
 			}
 			s.Unlock()
 		})
@@ -298,22 +286,24 @@ func (c *context) SendMsg(m *protocol.Message) error {
 
 	s.send()
 
-	// This sleeps until someone picks us up for scheduling.
+	// This sleeps until we are picked for scheduling.
 	// It is responsible for providing the blocking semantic and
-	// ultimately backpressure.  Note that we will "continue" if
-	// the send is canceled by a subsequent send.
-	for c.sendID == id {
+	// ultimately back-pressure.  Note that we will "continue" if
+	// sending is canceled by a subsequent send.
+	for c.sendMsg == m && !expired && !c.closed && !(c.failNoPeers && len(s.pipes) == 0) {
 		c.cond.Wait()
 	}
 	if c.sendMsg == m {
+		c.cancelSend()
 		c.sendMsg = nil
-		if expired {
-			return protocol.ErrSendTimeout
-		}
+		c.reqID = 0
 		if c.closed {
 			return protocol.ErrClosed
 		}
-		return protocol.ErrCanceled
+		if c.failNoPeers && len(s.pipes) == 0 {
+			return protocol.ErrNoPeers
+		}
+		return protocol.ErrSendTimeout
 	}
 	return nil
 }
@@ -322,17 +312,23 @@ func (c *context) RecvMsg() (*protocol.Message, error) {
 	s := c.s
 	s.Lock()
 	defer s.Unlock()
-	if c.recvWait || c.recvID == 0 {
+	if s.closed || c.closed {
+		return nil, protocol.ErrClosed
+	}
+	if c.failNoPeers && len(s.pipes) == 0 {
+		return nil, protocol.ErrNoPeers
+	}
+	if c.receiveWait || c.reqID == 0 {
 		return nil, protocol.ErrProtoState
 	}
-	c.recvWait = true
-	id := c.recvID
+	c.receiveWait = true
+	id := c.reqID
 	expired := false
 
-	if c.recvExpire > 0 {
-		c.recvTimer = time.AfterFunc(c.recvExpire, func() {
+	if c.receiveExpire > 0 {
+		c.receiveTimer = time.AfterFunc(c.receiveExpire, func() {
 			s.Lock()
-			if c.recvID == id {
+			if c.reqID == id {
 				expired = true
 				c.cancel()
 			}
@@ -340,22 +336,25 @@ func (c *context) RecvMsg() (*protocol.Message, error) {
 		})
 	}
 
-	for id == c.recvID && c.repMsg == nil {
+	for id == c.reqID && c.repMsg == nil {
 		c.cond.Wait()
 	}
 
 	m := c.repMsg
-	c.recvID = 0
+	c.reqID = 0
 	c.repMsg = nil
-	c.recvWait = false
+	c.receiveWait = false
 	c.cond.Broadcast()
 
 	if m == nil {
+		if c.closed {
+			return nil, protocol.ErrClosed
+		}
 		if expired {
 			return nil, protocol.ErrRecvTimeout
 		}
-		if c.closed {
-			return nil, protocol.ErrClosed
+		if c.failNoPeers && len(s.pipes) == 0 {
+			return nil, protocol.ErrNoPeers
 		}
 		return nil, protocol.ErrCanceled
 	}
@@ -376,7 +375,7 @@ func (c *context) SetOption(name string, value interface{}) error {
 	case protocol.OptionRecvDeadline:
 		if v, ok := value.(time.Duration); ok {
 			c.s.Lock()
-			c.recvExpire = v
+			c.receiveExpire = v
 			c.s.Unlock()
 			return nil
 		}
@@ -399,6 +398,16 @@ func (c *context) SetOption(name string, value interface{}) error {
 			return nil
 		}
 		return protocol.ErrBadValue
+
+	case protocol.OptionFailNoPeers:
+		if v, ok := value.(bool); ok {
+			c.s.Lock()
+			c.failNoPeers = v
+			c.s.Unlock()
+			return nil
+		}
+		return protocol.ErrBadValue
+
 	}
 
 	return protocol.ErrBadOption
@@ -413,7 +422,7 @@ func (c *context) GetOption(option string) (interface{}, error) {
 		return v, nil
 	case protocol.OptionRecvDeadline:
 		c.s.Lock()
-		v := c.recvExpire
+		v := c.receiveExpire
 		c.s.Unlock()
 		return v, nil
 	case protocol.OptionSendDeadline:
@@ -424,6 +433,11 @@ func (c *context) GetOption(option string) (interface{}, error) {
 	case protocol.OptionBestEffort:
 		c.s.Lock()
 		v := c.bestEffort
+		c.s.Unlock()
+		return v, nil
+	case protocol.OptionFailNoPeers:
+		c.s.Lock()
+		v := c.failNoPeers
 		c.s.Unlock()
 		return v, nil
 	}
@@ -440,7 +454,7 @@ func (c *context) Close() error {
 	}
 	c.closed = true
 	c.cancel()
-	delete(s.ctxs, c)
+	delete(s.contexts, c)
 	return nil
 }
 
@@ -472,21 +486,12 @@ func (s *socket) Close() error {
 		return protocol.ErrClosed
 	}
 	s.closed = true
-	for c := range s.ctxs {
+	for c := range s.contexts {
 		c.closed = true
 		c.cancel()
-		delete(s.ctxs, c)
+		delete(s.contexts, c)
 	}
-	pipes := make([]*pipe, 0, len(s.pipes))
-	for _, p := range s.pipes {
-		pipes = append(pipes, p)
-	}
-
 	s.Unlock()
-	// close and remove each and every pipe
-	for _, p := range pipes {
-		p.Close()
-	}
 	return nil
 }
 
@@ -497,14 +502,15 @@ func (s *socket) OpenContext() (protocol.Context, error) {
 		return nil, protocol.ErrClosed
 	}
 	c := &context{
-		s:          s,
-		cond:       sync.NewCond(s),
-		bestEffort: s.defCtx.bestEffort,
-		resendTime: s.defCtx.resendTime,
-		sendExpire: s.defCtx.sendExpire,
-		recvExpire: s.defCtx.recvExpire,
+		s:             s,
+		cond:          sync.NewCond(s),
+		bestEffort:    s.defCtx.bestEffort,
+		resendTime:    s.defCtx.resendTime,
+		sendExpire:    s.defCtx.sendExpire,
+		receiveExpire: s.defCtx.receiveExpire,
+		failNoPeers:   s.defCtx.failNoPeers,
 	}
-	s.ctxs[c] = struct{}{}
+	s.contexts[c] = struct{}{}
 	return c, nil
 }
 
@@ -513,46 +519,48 @@ func (s *socket) AddPipe(pp protocol.Pipe) error {
 		p: pp,
 		s: s,
 	}
+	pp.SetPrivate(p)
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
 		return protocol.ErrClosed
 	}
-	s.pipes[pp.ID()] = p
-	s.readyq = append(s.readyq, p)
+	s.readyQ = append(s.readyQ, p)
 	s.send()
+	s.pipes[pp.ID()] = p
 	go p.receiver()
 	return nil
 }
 
 func (s *socket) RemovePipe(pp protocol.Pipe) {
+	p := pp.GetPrivate().(*pipe)
 	s.Lock()
-	var pipes []*pipe
-	p := s.pipes[pp.ID()]
-	if p != nil && p.p == pp {
-		p.closed = true
-		pipes = append(pipes, p)
-		delete(s.pipes, pp.ID())
-		for i, rp := range s.readyq {
-			if p == rp {
-				s.readyq = append(s.readyq[:i], s.readyq[i+1:]...)
-			}
+	p.closed = true
+	for i, rp := range s.readyQ {
+		if p == rp {
+			s.readyQ = append(s.readyQ[:i], s.readyQ[i+1:]...)
 		}
-		for c := range s.ctxs {
-			if c.lastPipe == p {
-				// We are closing this pipe, so we need to
-				// immediately reschedule it.
-				c.lastPipe = nil
-				if m := c.reqMsg; m != nil {
-					go c.resendMessage(m)
-				}
+	}
+	delete(s.pipes, pp.ID())
+	for c := range s.contexts {
+		if c.failNoPeers && len(s.pipes) == 0 {
+			c.cancel()
+		} else if c.lastPipe == p && c.reqMsg != nil {
+			// We are closing this pipe, so we need to
+			// immediately reschedule it.
+			c.lastPipe = nil
+			id := c.reqID
+			// If there is no resend time, then we need to simply
+			// discard the message, because it's not necessarily idempotent.
+			if c.resendTime == 0 {
+				c.cancel()
+			} else {
+				c.cancelSend()
+				go c.resendMessage(id)
 			}
 		}
 	}
 	s.Unlock()
-	for _, p := range pipes {
-		p.Close()
-	}
 }
 
 func (*socket) Info() protocol.Info {
@@ -567,17 +575,17 @@ func (*socket) Info() protocol.Info {
 // NewProtocol allocates a new protocol implementation.
 func NewProtocol() protocol.Protocol {
 	s := &socket{
-		pipes:   make(map[uint32]*pipe),
-		nextID:  uint32(time.Now().UnixNano()), // quasi-random
-		ctxs:    make(map[*context]struct{}),
-		ctxByID: make(map[uint32]*context),
+		nextID:   uint32(time.Now().UnixNano()), // quasi-random
+		contexts: make(map[*context]struct{}),
+		ctxByID:  make(map[uint32]*context),
+		pipes:    make(map[uint32]*pipe),
 	}
 	s.defCtx = &context{
 		s:          s,
 		cond:       sync.NewCond(s),
 		resendTime: time.Minute,
 	}
-	s.ctxs[s.defCtx] = struct{}{}
+	s.contexts[s.defCtx] = struct{}{}
 	return s
 }
 

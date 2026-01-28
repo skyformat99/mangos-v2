@@ -1,4 +1,4 @@
-// Copyright 2018 The Mangos Authors
+// Copyright 2019 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -19,10 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"nanomsg.org/go/mangos/v2/errors"
-
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/transport"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/errors"
+	"go.nanomsg.org/mangos/v3/transport"
 )
 
 type dialer struct {
@@ -32,7 +31,6 @@ type dialer struct {
 	addr          string
 	closed        bool
 	active        bool
-	dialing       bool
 	asynch        bool
 	redialer      *time.Timer
 	reconnTime    time.Duration
@@ -69,6 +67,9 @@ func (d *dialer) Close() error {
 	if d.closed {
 		return mangos.ErrClosed
 	}
+	if d.redialer != nil {
+		d.redialer.Stop()
+	}
 	d.closed = true
 	return nil
 }
@@ -101,7 +102,7 @@ func (d *dialer) GetOption(n string) (interface{}, error) {
 func (d *dialer) SetOption(n string, v interface{}) error {
 	switch n {
 	case mangos.OptionReconnectTime:
-		if v, ok := v.(time.Duration); ok {
+		if v, ok := v.(time.Duration); ok && v >= 0 {
 			d.Lock()
 			d.reconnMinTime = v
 			d.Unlock()
@@ -109,7 +110,7 @@ func (d *dialer) SetOption(n string, v interface{}) error {
 		}
 		return mangos.ErrBadValue
 	case mangos.OptionMaxReconnectTime:
-		if v, ok := v.(time.Duration); ok {
+		if v, ok := v.(time.Duration); ok && v >= 0 {
 			d.Lock()
 			d.reconnMaxTime = v
 			d.Unlock()
@@ -123,6 +124,7 @@ func (d *dialer) SetOption(n string, v interface{}) error {
 			d.Unlock()
 			return nil
 		}
+		return mangos.ErrBadValue
 	}
 	// Transport specific options passed down.
 	return d.d.SetOption(n, v)
@@ -155,31 +157,18 @@ func (d *dialer) pipeClosed() {
 
 func (d *dialer) dial(redial bool) error {
 	d.Lock()
+	if d.closed {
+		d.Unlock()
+		return errors.ErrClosed
+	}
 	if d.asynch {
 		redial = true
 	}
-	if d.dialing || d.closed {
-		// If we already have a dial in progress, then stop.
-		// This really should never occur (see comments below),
-		// but having multiple dialers create multiple pipes is
-		// probably bad.  So be paranoid -- I mean "defensive" --
-		// for now.
-		d.Unlock()
-		return errors.ErrAddrInUse
-	}
-	if d.redialer != nil {
-		d.redialer.Stop()
-	}
-	d.dialing = true
 	d.Unlock()
 
 	p, err := d.d.Dial()
 	if err == nil {
 		d.s.addPipe(p, d, nil)
-
-		d.Lock()
-		d.dialing = false
-		d.Unlock()
 		return nil
 	}
 
@@ -193,11 +182,6 @@ func (d *dialer) dial(redial bool) error {
 	// 1. Initial dialing (via Dial())
 	// 2. After a previously created pipe fails and is closed due to error.
 	// 3. After timing out from a failed connection attempt.
-	//
-	// The above cases should be mutually exclusive.  But paranoia.
-	// Consider removing the d.dialing logic later if we can prove
-	// that this never occurs.
-	d.dialing = false
 
 	if !redial {
 		return err
@@ -226,5 +210,5 @@ func (d *dialer) dial(redial bool) error {
 }
 
 func (d *dialer) redial() {
-	d.dial(true)
+	_ = d.dial(true)
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 The Mangos Authors
+// Copyright 2019 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -17,14 +17,13 @@
 // automatically forwards any message it receives to any other peers.
 // In a star network, this means that all members should receive all messages,
 // assuming that there is a central server.  Its important to ensure that
-// the topology is free from cycles, as there is no protection against
-// that, and cycles can lead to infinite message storms.  (TODO: Add a TTL,
-// and basic message ID / anti-replay protection.)
+// the topology is free from cycles, as there is limited protection against
+// that, and cycles can lead to significant message duplication.
 package star
 
 import (
-	"nanomsg.org/go/mangos/v2/protocol"
-	"nanomsg.org/go/mangos/v2/protocol/xstar"
+	"go.nanomsg.org/mangos/v3/protocol"
+	"go.nanomsg.org/mangos/v3/protocol/xstar"
 )
 
 // Protocol identity information.

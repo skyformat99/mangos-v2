@@ -1,4 +1,4 @@
-// Copyright 2018 The Mangos Authors
+// Copyright 2022 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -18,14 +18,15 @@
 package protocol
 
 import (
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/errors"
-	"nanomsg.org/go/mangos/v2/internal/core"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/errors"
+	"go.nanomsg.org/mangos/v3/internal/core"
 )
 
 // Protocol numbers
 const (
 	ProtoPair       = mangos.ProtoPair
+	ProtoPair1      = mangos.ProtoPair1
 	ProtoPub        = mangos.ProtoPub
 	ProtoSub        = mangos.ProtoSub
 	ProtoReq        = mangos.ProtoReq
@@ -67,6 +68,7 @@ const (
 	ErrProtoOp     = errors.ErrProtoOp
 	ErrProtoState  = errors.ErrProtoState
 	ErrCanceled    = errors.ErrCanceled
+	ErrNoPeers     = errors.ErrNoPeers
 )
 
 // Common option definitions
@@ -84,6 +86,7 @@ const (
 	OptionLinger       = mangos.OptionLinger // Remove?
 	OptionTTL          = mangos.OptionTTL
 	OptionBestEffort   = mangos.OptionBestEffort
+	OptionFailNoPeers  = mangos.OptionFailNoPeers
 )
 
 // MakeSocket creates a Socket on top of a Protocol.

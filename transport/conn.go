@@ -1,4 +1,4 @@
-// Copyright 2018 The Mangos Authors
+// Copyright 2019 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -20,7 +20,7 @@ import (
 	"net"
 	"sync"
 
-	"nanomsg.org/go/mangos/v2"
+	"go.nanomsg.org/mangos/v3"
 )
 
 // conn implements the Pipe interface on top of net.Conn.  The
@@ -55,7 +55,7 @@ func (p *conn) Recv() (*Message, error) {
 	}
 
 	// Limit messages to the maximum receive value, if not
-	// unlimited.  This avoids a potential denaial of service.
+	// unlimited.  This avoids a potential denial of service.
 	if sz < 0 || (p.maxrx > 0 && sz > int64(p.maxrx)) {
 		return nil, mangos.ErrTooLong
 	}
@@ -89,16 +89,6 @@ func (p *conn) Send(msg *Message) error {
 	return nil
 }
 
-// LocalProtocol returns our local protocol number.
-func (p *conn) LocalProtocol() uint16 {
-	return p.proto.Self
-}
-
-// RemoteProtocol returns our peer's protocol number.
-func (p *conn) RemoteProtocol() uint16 {
-	return p.proto.Peer
-}
-
 // Close implements the Pipe Close method.
 func (p *conn) Close() error {
 	p.Lock()
@@ -111,51 +101,64 @@ func (p *conn) Close() error {
 }
 
 func (p *conn) GetOption(n string) (interface{}, error) {
+	switch n {
+	case mangos.OptionMaxRecvSize:
+		return p.maxrx, nil
+	}
 	if v, ok := p.options[n]; ok {
 		return v, nil
 	}
 	return nil, mangos.ErrBadProperty
 }
 
+func (p *conn) SetOption(n string, v interface{}) {
+	switch n {
+	case mangos.OptionMaxRecvSize:
+		p.maxrx = v.(int)
+	}
+	p.options[n] = v
+}
+
+// ConnPipe is used for stream oriented transports.  It is a superset of
+// Pipe, but adds methods specific for transports.
+type ConnPipe interface {
+
+	// SetOption just records an option that can be retrieved later.
+	SetOption(string, interface{})
+	Pipe
+}
+
 // NewConnPipe allocates a new Pipe using the supplied net.Conn, and
-// initializes it.  It performs the handshake required at the SP layer,
-// only returning the Pipe once the SP layer negotiation is complete.
+// initializes it.  It performs no negotiation -- use a Handshaker to
+// arrange for that.
 //
 // Stream oriented transports can utilize this to implement a Transport.
 // The implementation will also need to implement PipeDialer, PipeAccepter,
 // and the Transport enclosing structure.   Using this layered interface,
 // the implementation needn't bother concerning itself with passing actual
 // SP messages once the lower layer connection is established.
-func NewConnPipe(c net.Conn, proto ProtocolInfo, options map[string]interface{}) (Pipe, error) {
+func NewConnPipe(c net.Conn, proto ProtocolInfo) ConnPipe {
 	p := &conn{
 		c:       c,
 		proto:   proto,
 		options: make(map[string]interface{}),
 	}
 
-	p.options[mangos.OptionMaxRecvSize] = int(0)
-	p.options[mangos.OptionLocalAddr] = p.c.LocalAddr()
-	p.options[mangos.OptionRemoteAddr] = p.c.RemoteAddr()
-	for n, v := range options {
-		p.options[n] = v
-	}
-	p.maxrx = p.options[mangos.OptionMaxRecvSize].(int)
+	p.options[mangos.OptionMaxRecvSize] = 0
+	p.options[mangos.OptionLocalAddr] = c.LocalAddr()
+	p.options[mangos.OptionRemoteAddr] = c.RemoteAddr()
 
-	if err := p.handshake(); err != nil {
-		return nil, err
-	}
-
-	return p, nil
+	return p
 }
 
 // connHeader is exchanged during the initial handshake.
 type connHeader struct {
-	Zero    byte // must be zero
-	S       byte // 'S'
-	P       byte // 'P'
-	Version byte // only zero at present
-	Proto   uint16
-	Rsvd    uint16 // always zero at present
+	Zero     byte // must be zero
+	S        byte // 'S'
+	P        byte // 'P'
+	Version  byte // only zero at present
+	Proto    uint16
+	Reserved uint16 // always zero at present
 }
 
 // handshake establishes an SP connection between peers.  Both sides must
@@ -170,24 +173,112 @@ func (p *conn) handshake() error {
 		return err
 	}
 	if err = binary.Read(p.c, binary.BigEndian, &h); err != nil {
-		p.c.Close()
+		_ = p.c.Close()
 		return err
 	}
-	if h.Zero != 0 || h.S != 'S' || h.P != 'P' || h.Rsvd != 0 {
-		p.c.Close()
+	if h.Zero != 0 || h.S != 'S' || h.P != 'P' || h.Reserved != 0 {
+		_ = p.c.Close()
 		return mangos.ErrBadHeader
 	}
 	// The only version number we support at present is "0", at offset 3.
 	if h.Version != 0 {
-		p.c.Close()
+		_ = p.c.Close()
 		return mangos.ErrBadVersion
 	}
 
 	// The protocol number lives as 16-bits (big-endian) at offset 4.
 	if h.Proto != p.proto.Peer {
-		p.c.Close()
+		_ = p.c.Close()
 		return mangos.ErrBadProto
 	}
 	p.open = true
 	return nil
+}
+
+type connHandshakerPipe interface {
+	handshake() error
+
+	Pipe
+}
+
+type connHandshakerItem struct {
+	c connHandshakerPipe
+	e error
+}
+type connHandshaker struct {
+	workq  map[connHandshakerPipe]bool
+	doneq  []*connHandshakerItem
+	closed bool
+	cv     *sync.Cond
+	sync.Mutex
+}
+
+// NewConnHandshaker returns a Handshaker that works with
+// Pipes created via NewConnPipe or NewConnPipeIPC.
+func NewConnHandshaker() Handshaker {
+	h := &connHandshaker{
+		workq:  make(map[connHandshakerPipe]bool),
+		closed: false,
+	}
+	h.cv = sync.NewCond(h)
+	return h
+}
+
+func (h *connHandshaker) Wait() (Pipe, error) {
+	h.Lock()
+	defer h.Unlock()
+	for len(h.doneq) == 0 && !h.closed {
+		h.cv.Wait()
+	}
+	if h.closed {
+		return nil, mangos.ErrClosed
+	}
+	item := h.doneq[0]
+	h.doneq = h.doneq[1:]
+	return item.c, item.e
+}
+
+func (h *connHandshaker) Start(p Pipe) {
+	// If the following type assertion fails, then its a software bug.
+	conn := p.(connHandshakerPipe)
+	h.Lock()
+	h.workq[conn] = true
+	h.Unlock()
+	go h.worker(conn)
+}
+
+func (h *connHandshaker) Close() {
+	h.Lock()
+	h.closed = true
+	h.cv.Broadcast()
+	for conn := range h.workq {
+		_ = conn.Close()
+	}
+	for len(h.doneq) != 0 {
+		item := h.doneq[0]
+		h.doneq = h.doneq[1:]
+		if item.c != nil {
+			_ = item.c.Close()
+		}
+	}
+	h.Unlock()
+}
+
+func (h *connHandshaker) worker(conn connHandshakerPipe) {
+	item := &connHandshakerItem{c: conn}
+	item.e = conn.handshake()
+	h.Lock()
+	defer h.Unlock()
+
+	delete(h.workq, conn)
+
+	if item.e != nil {
+		_ = item.c.Close()
+		item.c = nil
+	} else if h.closed {
+		item.e = mangos.ErrClosed
+		_ = item.c.Close()
+	}
+	h.doneq = append(h.doneq, item)
+	h.cv.Broadcast()
 }

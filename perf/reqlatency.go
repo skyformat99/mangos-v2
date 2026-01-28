@@ -1,4 +1,4 @@
-// Copyright 2019 The Mangos Authors
+// Copyright 2020 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package perf provides utilities to measure mangos peformance against
-// libnanomsg' perf tools.
-
 package main
 
 import (
@@ -22,10 +19,10 @@ import (
 	"log"
 	"time"
 
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/protocol/rep"
-	"nanomsg.org/go/mangos/v2/protocol/req"
-	"nanomsg.org/go/mangos/v2/transport/all"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/protocol/rep"
+	"go.nanomsg.org/mangos/v3/protocol/req"
+	"go.nanomsg.org/mangos/v3/transport/all"
 )
 
 // ReqRepLatencyServer is the server side for REQ/REP latency testing.
@@ -34,16 +31,13 @@ func ReqRepLatencyServer(addr string, msgSize int, roundTrips int) {
 	if err != nil {
 		log.Fatalf("Failed to make new pair socket: %v", err)
 	}
-	defer func() { time.Sleep(10 * time.Microsecond); s.Close() }()
+	defer func() { time.Sleep(10 * time.Microsecond); _ = s.Close() }()
 
 	all.AddTransports(s)
 	l, err := s.NewListener(addr, nil)
 	if err != nil {
 		log.Fatalf("Failed to make new listener: %v", err)
 	}
-
-	// TCP no delay, please!
-	l.SetOption(mangos.OptionNoDelay, true)
 
 	err = l.Listen()
 	if err != nil {
@@ -70,16 +64,15 @@ func ReqRepLatencyClient(addr string, msgSize int, roundTrips int) {
 	if err != nil {
 		log.Fatalf("Failed to make new pair socket: %v", err)
 	}
-	defer s.Close()
+	defer func() {
+		_ = s.Close()
+	}()
 
 	all.AddTransports(s)
 	d, err := s.NewDialer(addr, nil)
 	if err != nil {
 		log.Fatalf("Failed to make new dialer: %v", err)
 	}
-
-	// TCP no delay, please!
-	d.SetOption(mangos.OptionNoDelay, true)
 
 	err = d.Dial()
 	if err != nil {

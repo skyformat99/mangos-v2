@@ -1,4 +1,4 @@
-// Copyright 2019 The Mangos Authors
+// Copyright 2020 The Mangos Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use file except in compliance with the License.
@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package perf provides utilities to measure mangos peformance against
-// libnanomsg' perf tools.
-
 package main
 
 import (
@@ -22,9 +19,9 @@ import (
 	"log"
 	"time"
 
-	"nanomsg.org/go/mangos/v2"
-	"nanomsg.org/go/mangos/v2/protocol/pair"
-	"nanomsg.org/go/mangos/v2/transport/all"
+	"go.nanomsg.org/mangos/v3"
+	"go.nanomsg.org/mangos/v3/protocol/pair"
+	"go.nanomsg.org/mangos/v3/transport/all"
 )
 
 // LatencyServer is the server side -- very much equivalent to local_lat in
@@ -34,16 +31,13 @@ func LatencyServer(addr string, msgSize int, roundTrips int) {
 	if err != nil {
 		log.Fatalf("Failed to make new pair socket: %v", err)
 	}
-	defer func() { time.Sleep(10 * time.Microsecond); s.Close() }()
+	defer func() { time.Sleep(10 * time.Microsecond); _ = s.Close() }()
 
 	all.AddTransports(s)
 	l, err := s.NewListener(addr, nil)
 	if err != nil {
 		log.Fatalf("Failed to make new listener: %v", err)
 	}
-
-	// TCP no delay, please!
-	l.SetOption(mangos.OptionNoDelay, true)
 
 	err = l.Listen()
 	if err != nil {
@@ -70,7 +64,7 @@ func LatencyClient(addr string, msgSize int, roundTrips int) {
 	if err != nil {
 		log.Fatalf("Failed to make new pair socket: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	all.AddTransports(s)
 	d, err := s.NewDialer(addr, nil)
@@ -78,16 +72,12 @@ func LatencyClient(addr string, msgSize int, roundTrips int) {
 		log.Fatalf("Failed to make new dialer: %v", err)
 	}
 
-	// TCP no delay, please!
-	d.SetOption(mangos.OptionNoDelay, true)
-
-	err = d.Dial()
-	if err != nil {
+	if err = d.Dial(); err != nil {
 		log.Fatalf("Failed to dial: %v", err)
 	}
 
 	// 100 milliseconds to give TCP a chance to establish
-	//time.Sleep(time.Millisecond * 100)
+	// time.Sleep(time.Millisecond * 100)
 	msg := mangos.NewMessage(msgSize)
 	msg.Body = msg.Body[0:msgSize]
 
